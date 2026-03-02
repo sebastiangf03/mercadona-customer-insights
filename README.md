@@ -1,5 +1,5 @@
 
-#  Mercadona Insights: Análisis Estadístico de Consumo y Big Data
+#  Mercadona Insights: Análisis Estadístico de Consumo y Customer Intelligence
 
 Este proyecto, denominado **ProyectoTD2024**, fue desarrollado por el **Grupo M** de la **Universitat de València**. Consiste en un pipeline completo de tratamiento de datos, desde la extracción de información no estructurada en tickets físicos hasta la generación de inteligencia de negocio.
 
