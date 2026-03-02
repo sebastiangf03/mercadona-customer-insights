@@ -1,0 +1,1313 @@
+---
+title: "Análisis Estadístico de Tickets de Mercadona"
+author: "David Ricci, Hugo Frasquet, Juan Gómez, Mateo Méndez, Pablo Quesada, Sebastian David"
+date: "`r format(Sys.Date(), '%d de %B, %Y')`"
+output:
+  html_document:
+    css: estilos.css
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    df_print: paged
+    fig_width: 7
+    fig_height: 6
+    fig_caption: true
+  pdf_document:
+    includes:
+      in_header: header.tex
+    toc: true
+    number_sections: true
+    fig_caption: true
+    df_print: paged
+    fig_width: 5
+    fig_height: 4
+    latex_engine: xelatex
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+# Cargamos pacman y usamos p_load para instalar y cargar librerías
+if (!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse, lubridate, knitr, stringr, hms, osmdata, sf, httr, geosphere, stringr, ggrepel, plotly) # Añade más librerías según sea necesario
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align='center')
+```
+
+```{r cleaning environment 0, include=FALSE}
+rm(list = ls())
+```
+
+
+# INTRODUCCIÓN
+
+La era del big data ha marcado un punto de inflexión en la forma en que las empresas comprenden sus operaciones, mercados y consumidores.
+En este contexto se sitúa nuestro proyecto, ProyectoTD2024 del Grupo M, que se ha dedicado al estudio detallado de los tickets de compra de Mercadona, uno de los supermercados más renombrados en España.
+A fecha de hoy, el repositorio permanece en privado por motivos de confidencialidad.
+Si en un futuro se decide hacer público, se podrá acceder a través del siguiente enlace: [ProyectoTD2024](https://github.com/paquepey/ProyectoTD2024).
+
+```{r figura1, fig.cap="Inicio de ticket en formato PDF", out.extra='scale=0.7', echo=FALSE}
+if (knitr::is_html_output()) {
+  knitr::include_graphics("pictures/ticket_ej1.png")
+}
+```
+
+```{r figura2, fig.cap="Final de ticket en formato PDF", out.extra='scale=0.7', echo=FALSE}
+if (knitr::is_html_output()) {
+  knitr::include_graphics("pictures/ticket_ej2.png")
+}
+```
+
+
+# GESTIÓN DE DATOS
+
+La primera parte del proyecto se ha basado en la obtención de tickets de Mercadona.
+Para ello, hemos preguntado a personas que conocemos si tenían tickets de compra de Mercadona y si podían proporcionárnoslos.
+Nuestro profesor de Tratamiento de Datos nos proporcionó un script en Python que nos permitía transformar los tickets en formato PDF a formato TXT.
+Hemos creado un programa que extrae todos los tickets en formato de texto de la carpeta donde se almacenan y los organiza, reescribiendo los datos depurados en otros documentos de texto que más tarde se utilizarán para analizar los datos.
+
+```{r figura3, fig.cap="Ticket no estructurado", out.extra='scale=0.7', echo=FALSE}
+if (knitr::is_html_output()) {
+  knitr::include_graphics("pictures/ticket_txt.png")
+}
+```
+
+```{r figura4, fig.cap="Ticket estructurado", out.extra='scale=0.7', echo=FALSE}
+if (knitr::is_html_output()) {
+  knitr::include_graphics("pictures/ticket_python.png")
+}
+```
+
+```{python Transformacion de tickets, include=FALSE}
+# Codigo de modificacion de tickets
+import os
+import re
+
+class Ticket:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.empresa = ''
+        self.direccion = ''
+        self.codigo_postal = ''
+        self.Municipio = ''
+        self.telefono = ''
+        self.fecha = ''
+        self.hora = ''
+        self.numero_operacion = ''
+        self.factura_simplificada = ''
+        self.parking = {}
+        self.items = list()
+        self.importe_total = ''
+        self._process_ticket()
+
+
+
+    def _process_ticket(self):
+        with open(self.file_path, 'r', encoding='latin1') as file:
+            lines = file.readlines()
+        
+        # Definimos la linea donde empiezan los productos
+        inicio_productos = lines[7]
+        
+        # Buscamos la ultima linea de productos
+        # Compilar la expresión regular para buscar la línea que contiene "TOTAL (€)"
+        total_pattern = re.compile(r"TOTAL \(\x80\) \d+,\d{2}")
+        indice_total = None
+        encontrado_indice_total = False
+
+        # Iterar sobre las líneas para encontrar la coincidencia
+        for i, line in enumerate(lines):
+            if total_pattern.search(line) and not encontrado_indice_total:
+                indice_total = i
+                encontrado_indice_total = True  # Encontramos la línea, podemos salir del bucle
+
+        if indice_total is not None and indice_total >= 2:
+            if 'PARKING' in lines[indice_total - 2]:
+                self._process_parking(lines[indice_total - 2], lines[indice_total - 1])
+                indice_productos_fin = indice_total - 2  # Ajustar el final para excluir el parking
+            else:
+                indice_productos_fin = indice_total
+            
+            self.items = self._extraer_productos(lines, 7, indice_productos_fin)
+        else:
+            self.items = []
+
+        
+        # Asumimos que cada elemento que necesitamos está en su propia línea y en el orden esperado
+        # La primera línea contiene la empresa, y la segunda la dirección
+        self.empresa = lines[0].strip()
+        self.direccion = lines[1].strip()
+        
+        # La tercera línea contiene el código postal y la Municipio
+        codigo_postal_Municipio = lines[2].strip().split(' ', 1)
+        self.codigo_postal = codigo_postal_Municipio[0].strip()
+        self.Municipio = codigo_postal_Municipio[1].strip()
+
+        # La cuarta línea contiene la palabra 'TELÉFONO' seguida por el número
+        telefono_parts = lines[3].strip().split(' ')
+        self.telefono = telefono_parts[1].strip() if len(telefono_parts) > 1 else ''
+
+        # La quinta línea contiene la fecha, la hora y el número de operación
+        quinta_linea_partes = lines[4].strip().split()
+        self.fecha = quinta_linea_partes[0].strip()
+        self.hora = quinta_linea_partes[1].strip()
+        self.numero_operacion = quinta_linea_partes[-1].strip() if len(quinta_linea_partes) > 3 else ''
+        
+        # La sexta línea contiene la factura simplificada
+        sexa_linea_partes = lines[5].strip().split(' ')
+        self.factura_simplificada = sexa_linea_partes[2]
+        
+        # Sabemos que la variable 'indice_total' representa la línea después de la última línea de             productos
+        importe_total_partes = lines[indice_total].strip().split(' ')
+        self.importe_total = importe_total_partes[2]
+        
+
+    
+    def _process_parking(self, parking_info_line, parking_time_line):
+        # Extraer y procesar datos de parking
+        parking_info_pattern = re.compile(r'(\d)PARKING (\d+,\d{2})')
+        parking_time_pattern = re.compile(r'ENTRADA\s+(\d{2}:\d{2})\s+SALIDA\s+(\d{2}:\d{2})')
+
+        info_match = parking_info_pattern.search(parking_info_line)
+        time_match = parking_time_pattern.search(parking_time_line)
+
+        if info_match and time_match:
+            self.parking['plazas'] = int(info_match.group(1))
+            self.parking['coste'] = float(info_match.group(2).replace(',', '.'))
+            self.parking['entrada'] = time_match.group(1)
+            self.parking['salida'] = time_match.group(2)
+
+        
+
+    def _extraer_productos(self, lines, inicio, fin):
+        productos = []
+        decimal_pattern = re.compile(r'\d+,\d{2}')
+        peso_precio_pattern = re.compile(r'(\d+,\d+)\s*kg\s*(\d+,\d+)\s*\x80/kg\s*(\d+,\d+)')
+
+        i = inicio
+        while i < fin:
+            linea = lines[i].strip()
+            
+            if "PESCADO" in linea:
+                # Procesar los productos de pescado hasta encontrar otra sección o el final de la lista
+                i += 1  # Saltar la línea 'PESCADO'
+                while i < fin and "TOTAL" not in lines[i] and not lines[i].strip().startswith('PESCADO'):
+                    descripcion = lines[i].strip()  # Tomar la descripción de la línea actual
+                    i += 1  # Avanzar a la línea de peso y precio
+                    match = peso_precio_pattern.search(lines[i])
+                    if match:
+                        # Si se encuentra la información de peso y precio, añadir al producto
+                        peso, precio_por_kilo, importe = match.groups()
+                        productos.append({
+                            "cantidad": None,  # No hay cantidad para los productos de pescado
+                            "descripcion": descripcion,
+                            "peso": float(peso.replace(',', '.')),
+                            "precio_por_kilo": float(precio_por_kilo.replace(',', '.')),
+                            "precio_unitario": None,  # No hay precio unitario para los productos de pescado
+                            "importe": float(importe.replace(',', '.'))
+                        })
+                    i += 1  # Avanzar para procesar el siguiente producto de pescado o llegar al 'TOTAL'
+                    continue
+            
+            
+            
+            
+            cantidad = int(linea[0]) if linea[0].isdigit() else None
+            descripcion = ''
+            precio_unitario = None
+            importe = None
+
+            precios = decimal_pattern.findall(linea)
+            if cantidad is not None:
+                if cantidad > 1 and len(precios) == 2:
+                    # Si hay dos precios y la cantidad es mayor que 1, el primero es el precio unitario, el segundo es el importe
+                    precio_unitario = float(precios[0].replace(',', '.'))
+                    importe = float(precios[1].replace(',', '.'))
+                elif cantidad == 1 and precios:
+                    # Si la cantidad es 1 y hay un precio, este es el importe (y el precio unitario)
+                    importe = float(precios[0].replace(',', '.'))
+                    precio_unitario = importe
+
+            # Comprobamos si la siguiente línea contiene información de peso y precio por kilo
+            if i + 1 < fin:
+                next_line = lines[i + 1].strip()
+                match = peso_precio_pattern.match(next_line)
+                if match:
+                    # La siguiente línea tiene información de peso, por lo que la actual es la descripción
+                    descripcion = linea[1:].strip()
+                    # Extraemos el peso, precio por kilo e importe de la siguiente línea
+                    peso, precio_por_kilo, importe_extra = match.groups()
+                    peso = float(peso.replace(',', '.'))
+                    precio_por_kilo = float(precio_por_kilo.replace(',', '.'))
+                    importe = float(importe_extra.replace(',', '.'))
+                    i += 1  # Incrementamos el índice ya que hemos procesado la siguiente línea
+                else:
+                    # Si no hay información de peso en la siguiente línea, la descripción va hasta el último precio
+                    descripcion_end_index = len(linea)
+                    if precios:
+                        descripcion_end_index = linea.rfind(precios[-1]) - 1
+                    descripcion = linea[1:descripcion_end_index].strip()
+            else:
+                descripcion = linea[1:].strip()  # La descripción es toda la línea si no hay precios
+
+            item = {
+                "cantidad": cantidad,
+                "descripcion": descripcion,
+                "peso": peso if 'peso' in locals() else None,  # Uso de locals() para evitar referencia antes de asignación
+                "precio_por_kilo": precio_por_kilo if 'precio_por_kilo' in locals() else None,
+                "precio_unitario": precio_unitario,
+                "importe": importe
+                }
+            productos.append(item)
+            i += 1  # Pasamos a la siguiente línea para continuar el procesamiento
+
+        return productos
+
+    def write_to_file(self, folder_path):
+        if not folder_path.endswith(os.path.sep):
+            folder_path += os.path.sep
+
+        # Construir el nombre del nuevo archivo añadiendo 'modificado' antes de la extensión del archivo
+        base, ext = os.path.splitext(self.file_path)
+        base = os.path.basename(base)  # Extrae solo el nombre del archivo sin la ruta
+        new_file_path = f"{folder_path}{base}_modificado{ext}"
+        
+        with open(new_file_path, 'w', encoding='latin1') as file:
+            # Escribir los detalles del ticket
+            file.write(self.empresa + '\n')
+            file.write(self.direccion + '\n')
+            file.write(self.codigo_postal + '\n')
+            file.write(self.Municipio + '\n')
+            file.write(self.telefono + '\n')
+            file.write(self.fecha + '\n')
+            file.write(self.hora + '\n')
+            file.write(self.numero_operacion + '\n')
+            file.write(self.factura_simplificada + '\n')
+            if self.parking:
+                file.write(f"{self.parking['plazas']} {self.parking['coste']} {self.parking['entrada']} {self.parking['salida']}\n")
+            file.write("Cantidad-Peso-Descripcion-Precio Unitario-Precio Por Kilo-Importe\n")
+            
+            # Escribir los items
+            for item in self.items:
+                line = (
+                    f"{item.get('cantidad', '')}-"
+                    f"{item.get('peso', '')}-"
+                    f"{item['descripcion']}-"
+                    f"{item.get('precio_unitario', '')}-"
+                    f"{item.get('precio_por_kilo', '')}-"
+                    f"{item.get('importe', '')}\n"
+                )
+                file.write(line)
+                
+            file.write(self.importe_total + '\n')
+    
+    
+    def display_info(self):
+        print(f"Empresa: {self.empresa}")
+        print(f"Dirección: {self.direccion}")
+        print(f"Código Postal: {self.codigo_postal}")
+        print(f"Municipio: {self.Municipio}")
+        print(f"Teléfono: {self.telefono}")
+        print(f"Fecha: {self.fecha}")
+        print(f"Hora: {self.hora}")
+        print(f"Número de operación: {self.numero_operacion}")
+        print(f"Factura simplificada: {self.factura_simplificada}")
+        if self.parking:
+            print(f"{self.parking['plazas']} {self.parking['coste']} {self.parking['entrada']} {self.parking['salida']}") 
+        for item in self.items:
+            print(f"- {item}")
+
+
+directorio = 'data'  # Directorio donde están los archivos .txt
+directorio_destino = 'data/data_modificada'  # Directorio donde se guardarán los archivos modificados
+
+# Asegurarse de que el directorio de destino existe, si no, crearlo
+if not os.path.exists(directorio_destino):
+    os.makedirs(directorio_destino)
+
+# Iterar sobre todos los archivos en el directorio fuente
+for file_name in os.listdir(directorio):
+    if file_name.endswith(".txt"):
+        file_path = os.path.join(directorio, file_name)  # Construir la ruta completa del archivo
+        folder_path = directorio_destino  # Establecer el directorio destino
+        
+        # Crear una instancia de Ticket y procesar el archivo
+        ticket = Ticket(file_path)
+        
+        # Opcional: Mostrar la información del ticket
+        # ticket.display_info()
+        
+        # Escribir el archivo modificado en el directorio de destino
+        ticket.write_to_file(folder_path)
+
+```
+
+Los problemas más grandes a los que nos hemos tenido que enfrentar es al manejo de casos donde los productos mostraban su información en kilos, precios unitarios y la existencia de parking.
+
+```{r figura5, fig.cap="Productos a kilo", out.extra='scale=0.7', echo=FALSE}
+knitr::include_graphics("pictures/productos_kilo.png")
+```
+
+```{r figura6, fig.cap="Pescados", out.extra='scale=0.7', echo=FALSE}
+knitr::include_graphics("pictures/pescado.png")
+```
+
+```{r figura7, fig.cap="Precios unitarios", out.extra='scale=0.7', echo=FALSE}
+knitr::include_graphics("pictures/precio_unit.png")
+```
+
+```{r figura8, fig.cap="Información del parking", out.extra='scale=0.7', echo=FALSE}
+knitr::include_graphics("pictures/existencia_parking.png")
+```
+
+
+# IMPORTACIÓN DE LOS DATOS
+
+Una vez estructurados y limpiados los datos decidimos que era hora de importarlos en R. Entre muchas librerías, nos hemos decantado por usar 'tidyverse', ya que nos permite trabajar con los ficheros y los datos de una manera familiar a la vista en clases. Decidimos que lo mejor sería utilizar 'R' para hacer nuestro análisis de los datos, ya que es un lenguaje de programación muy potente y versátil que nos permite realizar análisis estadísiticos de una manera muy eficiente. Esto se debe a que, la importación no depende de que tipo de análisis se vaya a realizar, por lo que es mejor tenerlo todo en un único archivo y que todos los miembros del grupo puedan acceder a él sin modificar los datos. 'Fecha de Compra' es un objeto de tipo fecha, 'Hora de Operación' es un objeto de tipo hora, al igual que 'Hora de Entrada' y 'Hora de Salida'.
+
+```{r Importacion de datos, include=FALSE}
+# Función para reemplazar "None" por NA y convertir a numérico
+clean_and_convert <- function(value) {
+  if (value == "None") {
+    return(NA)
+  } else {
+    value <- gsub(",", ".", value, fixed = TRUE)
+    return(as.numeric(value))
+  }
+}
+
+# Función para limpiar la descripción
+clean_description <- function(description) {
+  pattern <- "(\\d+\\,\\d+)(?!%)$"
+  return(str_trim(str_replace(description, pattern, "")))
+}
+
+# Función para procesar cada archivo
+process_file <- function(file) {
+  lines <- read_lines(file, locale = locale(encoding = "latin1"))
+  
+  # Extraemos la información de cabecera
+  cabecera <- tibble(
+    Empresa = lines[1],
+    Direccion = lines[2],
+    CodigoPostal = lines[3],
+    Municipio = lines[4],
+    Telefono = lines[5],
+    FechaCompra = lines[6],
+    HoraOperacion = lines[7],
+    NumeroOperacion = lines[8],
+    FacturaSimplificada = lines[9]
+  )
+  
+  # Información de parking si aplica
+  if (substr(lines[10], 1, 1) != "C") {
+    parking_info <- str_split(lines[10], " ")[[1]]
+    parking <- tibble(
+      Plazas = as.integer(parking_info[1]),
+      Coste = as.numeric(parking_info[2]),
+      Entrada = parking_info[3],
+      Salida = parking_info[4]
+    )
+  } else {
+    parking <- tibble(Plazas = NA_integer_, Coste = NA_real_, Entrada = NA_character_, Salida = NA_character_)
+  }
+  
+  # Determinar la línea inicial de productos
+  start_line <- if (!is.na(parking$Plazas)) 11 else 10
+  end_line <- length(lines) - 1  # Excluir la última línea del importe total
+  productos_lines <- lines[start_line:end_line]
+  
+  productos_df <- tibble(
+    Cantidad = NA,
+    Peso = NA,
+    Descripcion = NA_character_,
+    PrecioUnitario = NA,
+    PrecioPorKilo = NA,
+    Importe = NA
+  )
+  
+  for (i in 1:length(productos_lines)) {
+    producto_info <- str_split(productos_lines[i], "-", simplify = TRUE)
+    descripcion <- clean_description(producto_info[3])
+    
+    if (grepl("Descripcion", descripcion, ignore.case = TRUE)) {
+      next  # Saltar al siguiente ciclo del bucle
+    }
+    
+    if (!grepl("ESCADO", descripcion, ignore.case = TRUE)) {
+      productos_df <- productos_df %>%
+        add_row(
+          Cantidad = clean_and_convert(producto_info[1]),
+          Peso = clean_and_convert(producto_info[2]),
+          Descripcion = descripcion,
+          PrecioUnitario = clean_and_convert(producto_info[4]),
+          PrecioPorKilo = clean_and_convert(producto_info[5]),
+          Importe = clean_and_convert(producto_info[6])
+        )
+    }
+  }
+  
+  productos_df <- productos_df[-1,]  # Elimina la fila inicial de NA
+  importe_total <- as.numeric(gsub(",", ".", lines[length(lines)], fixed = TRUE)) 
+  productos_df$ImporteTotal <- importe_total  # Asignar importe total a todas las filas
+
+  # Unimos la información de cabecera, parking, productos y agregamos importe total
+  ticket_df <- bind_rows(lapply(1:nrow(productos_df), function(i) {
+    producto_actual <- productos_df[i, ]
+    cbind(cabecera, parking, producto_actual)
+  }))
+  
+  return(ticket_df)
+}
+
+# Definimos la ruta de la carpeta con los archivos
+path <- "data/data_modificada"
+
+# Obtenemos una lista de todos los archivos .txt en la carpeta
+files <- list.files(path, pattern = "[.]txt$", full.names = TRUE)
+
+# Procesamos todos los archivos y combinamos los resultados
+observaciones <- bind_rows(lapply(files, process_file), .id = "ticket_id")
+
+# Mostramos los primeros registros del data.frame final
+print(head(observaciones))
+
+
+write.csv(observaciones, 'ficheros_posteriores/observaciones.csv')
+```
+
+
+# VARIABLES USADAS EN EL ANÁLISIS
+
+```{r, echo=FALSE}
+# Crear un data frame con la información de las variables
+variables_df <- data.frame(
+  Variable = c("ticket_id", "Empresa", "Direccion", "CodigoPostal", "Municipio", "Telefono", 
+               "FechaCompra", "HoraOperacion", "NumeroOperacion", "FacturaSimplificada", "Plazas", 
+               "Coste", "Entrada", "Salida", "Cantidad", "Peso", "Descripcion", "PrecioUnitario", 
+               "PrecioPorKilo", "Importe", "ImporteTotal"),
+  `Tipo de Dato` = c("Numérico", "Texto", "Texto", "Numérico", "Texto", "Texto",
+                     "Fecha (YYYY-MM-DD)", "Hora (HH:MM:SS)", "Numérico", "Texto", "Numérico",
+                     "Numérico (euros)", "Hora (HH:MM:SS)", "Hora (HH:MM:SS)", "Numérico",
+                     "Numérico (kilogramos)", "Texto", "Numérico (euros)",
+                     "Numérico (euros por kilo)", "Numérico (euros)", "Numérico (euros)"),
+  Descripcion = c("Identificador único de cada ticket", "Nombre de la empresa (Mercadona)",
+                  "Dirección del supermercado donde se realizó la compra",
+                  "Código postal del supermercado", "Municipio donde se encuentra el supermercado",
+                  "Número de teléfono del supermercado", "Fecha en que se realizó la compra",
+                  "Hora exacta de la operación de compra", "Número secuencial de la operación de compra",
+                  "Indica si la factura emitida es simplificada", "Número de plazas de estacionamiento disponibles",
+                  "Coste asociado a la operación", "Hora de entrada al estacionamiento",
+                  "Hora de salida del estacionamiento", "Cantidad del producto comprado",
+                  "Peso del producto comprado", "Descripción del producto comprado",
+                  "Precio unitario del producto", "Precio del producto por kilogramo",
+                  "Importe del producto específico en el ticket", "Importe total de todos los productos en el ticket")
+)
+
+# Imprimir la tabla
+kable(variables_df, caption = "Descripción de las Variables del ProyectoTD2024", align = 'l', col.names = c("Variable", "Tipo de Dato", "Descripción"))
+```
+
+
+# ANÁLISIS DE DATOS
+
+Una vez que teníamos todos los tickets consolidados en un único dataframe, procedimos a realizar un análisis exploratorio de los datos.
+Para ello, recurrimos al uso de gráficas como el boxplot y el histograma, que nos permitieron identificar valores atípicos y distribuciones inusuales.
+Posteriormente, realizamos un análisis de correlación entre las variables, lo que nos permitió identificar posibles relaciones entre ellas.
+
+Después de visualizar y comprender mejor las variables, nos reunimos para decidir que preguntas podemos responder, y nos decantamos por las siguientes: 
+- ¿Cómo afecta el estacionamiento en las compras?
+- ¿Cómo afecta la ubicación del local a la compra?
+- ¿Existen patrones de compra según la hora del día?
+- ¿Cómo varía la compra entre distintos días?
+
+A continuación, se presentan los análisis realizados para responder a las preguntas planteadas.
+
+
+## ¿Cómo afecta el estacionamiento en las compras?
+
+Uno de los aspectos a considerar que puede tener un Supermercado como Mercadona es cómo influye el uso del parking en las compras de sus clientes.
+Para ello, hemos hecho un análsis de la duración de los tickets en el parking y el importe total de la compra.
+
+Primero de todo, queríamos ver como influía el tiempo del parking en el importe total de la compra.
+Para ello, hemos realizado un gráfico de dispersión con una línea de tendencia que nos muestra la relación entre ambas variables.
+
+```{r cleaning environment 1, include=FALSE}
+rm(list = ls())
+```
+
+```{r, include=FALSE}
+# Reordenamos las librerias
+library(dplyr)
+
+observaciones <- read.csv('ficheros_posteriores/observaciones.csv')
+# Guardamos una copia por si acaso
+observaciones2 <- observaciones
+
+# Seleccionamos solamente las columnas que nos interesan
+observaciones <- observaciones %>%
+  select(ticket_id, Municipio, FechaCompra, HoraOperacion, Plazas, Entrada, Salida, ImporteTotal) %>%
+  distinct(ticket_id, .keep_all = TRUE) %>%
+  mutate(parking = !is.na(Plazas))
+
+# Asegurarse de que las columnas son caracteres y no factores
+observaciones$Entrada <- as.character(observaciones$Entrada)
+observaciones$Salida <- as.character(observaciones$Salida)
+
+# Función para convertir hora HH:MM a minutos
+convertir_a_minutos <- function(hora) {
+  partes <- strsplit(hora, ":")[[1]]
+  if(length(partes) == 2) {
+    horas <- as.numeric(partes[1])
+    minutos <- as.numeric(partes[2])
+    return(horas * 60 + minutos)
+  } else {
+    return(NA)  # Devuelve NA si el formato no es correcto
+  }
+}
+
+# Aplicar la función a cada entrada de las columnas Entrada y Salida
+minutos_entrada <- sapply(observaciones$Entrada, convertir_a_minutos)
+minutos_salida <- sapply(observaciones$Salida, convertir_a_minutos)
+
+# Calcular la diferencia en minutos y agregarla como nueva columna
+observaciones <- observaciones %>%
+  mutate(TiempoParking = minutos_salida - minutos_entrada) %>%
+  select(-c(Entrada, Salida)) %>%
+  select(-c(Plazas))
+```
+
+```{r, include=FALSE}
+# Crear un tema personalizado
+tema_personalizado <- theme_minimal() +
+  theme(
+    #text = element_text(family = "Arial", color = "#333333"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+# Colores para usar en todas las gráficas
+colores <- scale_fill_manual(values = c("Municipio1" = "#1f77b4", "Municipio2" = "#ff7f0e", "Municipio3" = "#2ca02c"))
+```
+
+```{r, echo=FALSE}
+# Filtrar las observaciones para quitar los NA en TiempoParking e ImporteTotal
+observaciones_filtradas <- na.omit(observaciones[c("ImporteTotal", "TiempoParking")])
+
+# Crear el gráfico de dispersión
+p1 <- ggplot(observaciones_filtradas, aes(x = TiempoParking, y = ImporteTotal)) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Tiempo de Parking (minutos)", y = "Importe", 
+       title = "Importe según el tiempo de parking") +
+  geom_smooth(mapping = aes(x = TiempoParking, y = ImporteTotal)) +
+  tema_personalizado +
+  colores
+
+
+
+if (knitr::is_html_output()) {
+  p2 <- ggplotly(p1)
+  p2
+} else {
+  p1
+}
+```
+
+Como podemos observar en el gráfico, parece haber una tendencia positiva entre el tiempo de parking y el importe total de la compra.
+Aunque tenemos algunas compras que, aun teniendo un tiempo de parking alto, el importe no es alto. Para profundizar en este análisis, hemos realizado un histograma de la duración en el parking para ver la distribución de los tiempos de parking.
+
+```{r figura 9, echo=FALSE}
+df_parking <- observaciones[!is.na(observaciones$TiempoParking), ]
+
+p3 <- ggplot(df_parking, aes(x = TiempoParking)) +
+  geom_histogram(
+    bins = 10,  # Define el número de barras como en el ejemplo anterior
+    fill = "blue",  # Puedes ajustar el color aquí o usar el esquema de colores definido
+    color = "black"  # Color de las líneas de las barras
+  ) +
+  labs(
+    title = "Duración en el parking",
+    x = "Duración en minutos",
+    y = "Frecuencia"
+  ) +
+  tema_personalizado
+
+
+
+if (knitr::is_html_output()) {
+  p4 <- ggplotly(p3)
+  p4
+} else {
+  p3
+}
+```
+
+El histograma sugiere que los clientes de Mercadona que utilizan el parking lo hacen más para compras de corta duración que para compras de larga duración.
+
+
+## ¿Cómo afecta la ubicación del local a la compra?
+
+Lo primordial fue calcular las coordenadas de cada local de Mercadona.
+Después exportamos de [OpenStreetMap](https://www.openstreetmap.org/) un fichero que contenía las coordenadas de los SuperMercados más cercanos a cada local de Mercadona que tenemos en nuestros datos.
+
+Calculamos la distancia euclidiana entre cada sucursal y sus competidores más próximos, definiendo dos rangos de proximidad: 500 metros y 1 kilómetro.
+Para ver si teníamos alguna correlación entre la distancia a los competidores y el importe total de la compra, decidimos utilizar pearson para ver si había alguna correlación entre ambas variables, y representarla en un gráfico de dispersión.
+Cuando vimos el potencial que tiene hacer un análisis de correlación de Pearson, decidimos preguntarnos si existe alguna correlación entre la distancia a los competidores y el número de compras.
+
+```{r cleaning environment 2, include=FALSE}
+rm(list = ls())
+```
+
+```{r, include=FALSE}
+library(geosphere)
+library(tidyverse)
+library(osmdata)
+library(sf)
+library(httr)
+library(stringr)
+library(dplyr)
+
+mercadona_df <-read.csv('ficheros_posteriores/observaciones.csv', sep = ",", header = TRUE, stringsAsFactors = FALSE)
+
+
+mercadona_df <- mercadona_df %>% select (ticket_id, Empresa, Direccion, CodigoPostal, Municipio, ImporteTotal,ticket_id) %>%
+  distinct(.keep_all = TRUE)
+
+geocode_address <- function(address) {
+  response <- GET(
+    url = "https://nominatim.openstreetmap.org/search",
+    query = list(q = address, format = "json", limit = 1),
+    user_agent = "sebgu0305@gmail.com"  # Importante definir un User-Agent
+  )
+  if (length(content(response, "parsed")) > 0) {
+    location <- content(response, "parsed")[[1]]
+    if (!is.null(location$lon) && !is.null(location$lat)) {
+      return(c(lon = location$lon, lat = location$lat))
+    } else {
+      return(NA)
+    }
+  } else {
+    return(NA)
+  }
+}
+
+
+mercadona_df <- mercadona_df %>%
+  mutate(Direccion = sub(" S\\/N$", "", Direccion))%>%
+  mutate(coordenadas = map(paste(Direccion, CodigoPostal, Municipio, sep = ", "), geocode_address))
+
+options(digits = 12)
+
+# Verificar y limpiar los datos
+
+# Ordenar el dataframe por la columna "Direccion"
+mercadona_df <- mercadona_df[order(mercadona_df$Direccion), ]
+
+
+direcciones_registrar <- subset(mercadona_df, grepl("NA", coordenadas)) %>%
+  group_by(Direccion) 
+ unique(direcciones_registrar$Direccion)
+
+#Agregar coordenadas manualmente a mercadonas sin coordenadas por openstreetmap
+mercadona_df[mercadona_df$Direccion == "C/ MENORCA (C.C. AQUA) 19", "coordenadas"] <- list('c(lon = -0.34547005926295615, lat = 39.45702052361771)')
+mercadona_df[mercadona_df$Direccion == "C/ JERÓNIMO MONSORIU 60","coordenadas"] <- list('c(lon = "-0.33943250336394853", lat = "39.46496837882039")')
+mercadona_df[mercadona_df$Direccion == "C/ GENERAL AVILÉS 79","coordenadas"] <- list('c(lon = "0.40343906785426364", lat = "39.48265872530307")')
+mercadona_df[mercadona_df$Direccion == "AVDA. FERNANDO EL CATÓLICO 1","coordenadas"] <- list('c(lon = "-0.3952289046410521", lat = "39.54561753521614")')
+mercadona_df[mercadona_df$Direccion == "AVDA. OBISPO VICTORINO OLIVER 2","coordenadas"] <- list('c(lon = "-0.9559021245984873", lat = "38.19680522392054")')
+mercadona_df[mercadona_df$Direccion == "C/ VICENTE BOIX 4","coordenadas"] <- list('c(lon = "-0.5239036663335815", lat = "38.995866280244684")')
+mercadona_df[mercadona_df$Direccion == "CTRA. N-3 1","coordenadas"] <- list('c(lon = "-1.0862631275664767", lat = "39.48907315121579")')
+
+# Calcular la frecuencia de cada dirección
+frecuencia_tickets <- table(mercadona_df$Direccion)
+
+# Asignar la frecuencia como una nueva columna en mercadona_df
+mercadona_df$frecuencia <- frecuencia_tickets[match(mercadona_df$Direccion, names(frecuencia_tickets))]
+
+
+
+mercadona_df_filtered <- mercadona_df %>%
+  group_by(Direccion, Municipio, coordenadas, CodigoPostal,frecuencia) %>%
+  summarise(ImporteTotal = mean(ImporteTotal, na.rm = TRUE)) %>%
+  mutate(
+    coordenadas = gsub("c\\(lon = (.*), lat = (.*)\\)", "\\1,\\2", coordenadas),
+    coordenadas = gsub(",", ", ", coordenadas),
+    coordenadas = gsub(" ", "", coordenadas)
+  ) %>%
+  separate(coordenadas, c("lon", "lat"), sep = ",", convert = TRUE) %>%
+  filter(!is.na(lon) & !is.na(lat))  # Eliminar filas con NA en lon o lat
+
+mercadona_df_filtered<-mercadona_df_filtered%>%mutate(Direccion = sub(" S\\/N$", "", Direccion))
+
+# Convertir la columna 'lon' y 'lat' a numérica
+str(mercadona_df_filtered$lon)
+mercadona_df_filtered$lon <- as.numeric(gsub("\"", "", mercadona_df_filtered$lon))
+str(mercadona_df_filtered$lat)
+mercadona_df_filtered$lat <- as.numeric(gsub("\"", "", mercadona_df_filtered$lat))
+```
+
+```{r, include=FALSE}
+#Comptetidores
+competidores_df <- read.csv('ficheros_posteriores/competidores.csv', sep = ',', header = TRUE, stringsAsFactors = FALSE, row.names = NULL)
+
+
+competidores_df$latitud <- gsub("[^0-9.]", "", competidores_df$row.names)
+competidores_df <- competidores_df %>%
+  mutate(row.names = gsub(";[0-9.]*", "", row.names)) %>%
+  rename(longitud = empresa.coordenadas) %>%
+  rename(competidores.nombres = row.names)
+
+# Suponiendo que 'longitudes' y 'latitudes' son vectores de cadenas de caracteres con las coordenadas
+
+# Convertir las cadenas de caracteres a números y eliminar las comillas
+competidores_df<-competidores_df %>% 
+  mutate(
+    longitud= as.numeric(gsub("\"", "", longitud)),
+    latitud= as.numeric(gsub("\"", "", latitud))
+)
+
+
+#Verificar si existen valores fuera del rango
+outside_range <- competidores_df$longitud < -180 | competidores_df$longitud > 180
+
+
+outside_range2 <- competidores_df$latitud < -90 | competidores_df$latitud > 90
+
+table(outside_range)
+table(outside_range2)
+
+#Funcion numero de competidores
+calcular_competidores <- function(mercadona_df_filtered, competidores_df) {
+  num_competidores <- numeric(nrow(mercadona_df_filtered))  # Vector para almacenar el número de competidores para cada Mercadona
+  
+  for (i in 1:nrow(mercadona_df_filtered)) {
+    lon_mercadona <- mercadona_df_filtered$lon[i]  # Longitud de la Mercadona actual
+    lat_mercadona <- mercadona_df_filtered$lat[i]  # Latitud de la Mercadona actual
+    
+    # Contador para el número de competidores dentro del radio de 500 metros
+    num_competidores_within_radius <- 0
+    
+    for (j in 1:nrow(competidores_df)) {
+      lon_competidor <- competidores_df$longitud[j]  # Longitud del competidor actual
+      lat_competidor <- competidores_df$latitud[j]  # Latitud del competidor actual
+      
+      # Calcula la distancia entre la Mercadona y el competidor actual
+      distancia <- distGeo(c(lon_mercadona, lat_mercadona), c(lon_competidor, lat_competidor))
+      
+      # Si la distancia es menor o igual a 1000 metros, aumenta el contador
+      if (distancia <= 1000) {
+        num_competidores_within_radius <- num_competidores_within_radius + 1
+      }
+    }
+    
+    # Almacena el número de competidores para esta Mercadona en el vector
+    num_competidores[i] <- num_competidores_within_radius
+    
+  }
+  
+  return(num_competidores)  # Devuelve el vector con el número de competidores
+}
+
+# Llamo a la función para calcular el número de competidores y asignarlos a una nueva columna en el dataframe
+mercadona_df_filtered$competidores<-calcular_competidores(mercadona_df_filtered, competidores_df)
+
+
+#Calculamos si existe alguna correlacion con el coeficiente de correlación de Pearson
+correlation <- cor(mercadona_df_filtered$ImporteTotal, mercadona_df_filtered$competidores)
+
+print(correlation)
+
+# Definimos la función para contar competidores cercanos
+count_nearby_competitors <- function(lon, lat, competitors) {
+  distances <- distHaversine(matrix(c(lon, lat), nrow = 1), competitors[, c("longitud", "latitud")])
+  sum(distances <= 500)
+}
+
+# Calculamos los competidores cercanos para cada tienda de Mercadona
+mercadona_df_filtered$competidores_cercanos <- mapply(count_nearby_competitors, 
+                                                      mercadona_df_filtered$lon, 
+                                                      mercadona_df_filtered$lat, 
+                                                      MoreArgs = list(competitors = competidores_df))
+
+# Calculamos la correlación de Pearson
+correlation_value <- cor(mercadona_df_filtered$competidores_cercanos, mercadona_df_filtered$ImporteTotal, use = "complete.obs")
+
+```
+
+```{r, include=FALSE}
+# Crear un tema personalizado
+tema_personalizado <- theme_minimal() +
+  theme(
+    #text = element_text(family = "Arial", color = "#333333"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+# Colores para usar en todas las gráficas
+colores <- scale_fill_manual(values = c("Municipio1" = "#1f77b4", "Municipio2" = "#ff7f0e", "Municipio3" = "#2ca02c"))
+```
+
+```{r figura 10, echo=FALSE}
+# Gráfico radio 500m
+p5 <- ggplot(mercadona_df_filtered, aes(x = competidores_cercanos, y = ImporteTotal)) +
+  geom_point(alpha = 0.6, color = "black") +  # Puntos de datos
+  geom_smooth(method = "lm", color = "blue") +  # Línea de regresión
+  geom_label_repel(data = data.frame(x = Inf, y = Inf, label = sprintf("Correlación: %.2f", correlation_value)),
+                   aes(label = label), x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, 
+                   box.padding = 0.5, point.padding = 0.5, segment.color = 'grey50') +
+  labs(x = "Número de competidores en 500m",
+       y = "Media de coste de ticket",
+       title = "Correlación entre número de competidores y precio medio de ticket",
+       subtitle = "Análisis de correlación de Pearson") +
+  tema_personalizado +
+  colores
+
+
+
+if (knitr::is_html_output()) {
+  p6 <- ggplotly(p5)
+  p6
+} else {
+  p5
+}
+```
+
+```{r figura 11, echo=FALSE}
+# Gráfico radio 1000m
+p7 <- ggplot(mercadona_df_filtered, aes(x = competidores, y = ImporteTotal)) +
+  geom_point(alpha = 0.6, color = "black") +  # Puntos de datos
+  geom_smooth(method = "lm", color = "blue") +  # Línea de regresión
+  geom_label_repel(data = data.frame(x = Inf, y = Inf, label = sprintf("Correlación: %.2f", correlation_value)),
+                   aes(label = label), x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, 
+                   box.padding = 0.5, point.padding = 0.5, segment.color = 'grey50') +
+  labs(x = "Número de competidores en 1000m",
+       y = "Media de coste de ticket",
+       title = "Correlación entre número de competidores y precio medio de ticket",
+       subtitle = "Análisis de correlación de Pearson") +
+  tema_personalizado +
+  colores
+
+
+
+if (knitr::is_html_output()) {
+  p8 <- ggplotly(p7)
+  p8
+} else {
+  p7
+}
+```
+
+```{r figura 12, echo=FALSE}
+
+#Correlación entre Competidores Cercanos y Número de Compras-500m
+p9 <- ggplot(mercadona_df_filtered, aes(x = competidores_cercanos, y = frecuencia)) +
+  geom_point(alpha = 0.6, color = "black") +  # Puntos de datos
+  geom_smooth(method = "lm", color = "blue") +  # Línea de regresión
+  geom_label_repel(data = data.frame(x = Inf, y = Inf, label = sprintf("Correlación: %.2f", correlation_value)),
+                   aes(label = label), x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, 
+                   box.padding = 0.5, point.padding = 0.5, segment.color = 'grey50') +
+  labs(x = "Número de competidores en 500m",
+       y = "Número de compras",
+       title = "Correlación entre competidores y número de compras",
+       subtitle = "Análisis de correlación de Pearson") +
+  tema_personalizado +
+  colores
+
+
+
+if (knitr::is_html_output()) {
+  p10 <- ggplotly(p9)
+  p10
+} else {
+  p9
+}
+```
+
+```{r figura 13, echo=FALSE}
+#Correlación entre Competidores Cercanos y Número de Compras-1000m
+p11 <- ggplot(mercadona_df_filtered, aes(x = competidores, y = frecuencia)) +
+  geom_point(alpha = 0.6, color = "black") +  # Puntos de datos
+  geom_smooth(method = "lm", color = "blue") +  # Línea de regresión
+  geom_label_repel(data = data.frame(x = Inf, y = Inf, label = sprintf("Correlación: %.2f", correlation_value)),
+                   aes(label = label), x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, 
+                   box.padding = 0.5, point.padding = 0.5, segment.color = 'grey50') +
+  labs(x = "Número de competidores en 1000m",
+       y = "Número de compras",
+       title = "Correlación entre competidores y número de compras",
+       subtitle = "Análisis de correlación de Pearson") +
+  tema_personalizado +
+  colores
+
+
+
+if (knitr::is_html_output()) {
+  p12 <- ggplotly(p11)
+  p12
+} else {
+  p11
+}
+```
+
+En conclusión, aunque inicialmente podríamos haber esperado que la competencia cercana tuviera un impacto significativo en las compras en diferentes ubicaciones, nuestros análisis no respaldan esta hipótesis.
+
+También podemos comprobar que aún siendo la correlación entre el número de competidores y el número de tickets mejor que la correlación entre el número de competidores y el importe total de la compra, no podemos decir que haya una correlación significativa entre ambas variables.
+
+Ahora, le hemos dado un cambio de enfoque a nuestro análisis para ver la tendencia de la compra dependiendo de la Municipio. Para ello, hemos cogido la variable 'Municipio' como la principal.
+Queríamos ver cuál era la relación entre la Municipio y el importe total de la compra.
+
+```{r figura 14, echo=FALSE}
+observaciones <- read_csv("./ficheros_posteriores/observaciones.csv")
+observaciones<- observaciones%>%select(-...1)
+observaciones2<-observaciones%>%group_by(ImporteTotal,Municipio)%>%
+  summarise(Total = sum(n()))
+observaciones2<-select(observaciones2,c(Municipio,ImporteTotal))
+p13 <- ggplot(observaciones2,aes(Municipio,y=ImporteTotal))+geom_point()+coord_flip()+labs(title = "Precio medio", x = " Municipios", y = "Importe") + tema_personalizado
+#g
+
+
+if (knitr::is_html_output()) {
+  p14 <- ggplotly(p13)
+  p14
+} else {
+  p13
+}
+```
+
+El gráfico sugiere que, aunque Denia se destaque como el lugar donde se realizan las compras de mayor valor, Valencia también muestra compras significativamente elevadas y cercanas a ese máximo. Esta observación sugiere que Valencia podría tener un nivel económico similar o incluso superior al de Denia, a pesar de que Denia tenga la compra más alta en este conjunto de datos limitado.
+
+```{r figura 15, echo=FALSE}
+observaciones3<-select(observaciones,c(Municipio,Importe))
+p15 <- ggplot(observaciones3,aes(x=Municipio,y=Importe))+geom_point()+coord_flip()+labs(title = "Precio unitario", x = " Municipios", y = "Importe por producto") + tema_personalizado
+
+
+
+if (knitr::is_html_output()) {
+  p16 <- ggplotly(p15)
+  p16
+} else {
+  p15
+}
+```
+
+Al analizar el gráfico, podemos verificar si efectivamente donde se compran los productos más caros coincide con las regiones donde el importe total es más alto.
+Observamos que, si bien Denia destaca como el lugar donde se adquiere el producto más costoso, la ciudad de Valencia lidera en cuanto al promedio de precios y volumen de compras.
+
+
+## ¿Existen patrones de compra según la hora del día?
+
+Una de las preguntas que más nos interesaba responder y analizar era como influye la compra en función de la hora del día.
+
+Queríamos saber a qué horas va más la gente a comprar. Para ello, hemos realizado un histograma que nos muestra la distribución de las compras a lo largo del día.
+
+También estábamos interesados en saberr si hay alguna relación entre la hora de compra y el importe total del ticket. Para ello, hemos realizado un boxplot que nos muestra la relación entre la hora de compra y el importe total del ticket.
+
+```{r cleaning environment 3, include=FALSE}
+rm(list = ls())
+```
+
+```{r figura 16, include=FALSE}
+observaciones <- read_csv("./ficheros_posteriores/observaciones.csv")
+#Creamos el df con las variables que nos interesan para nuestro estudio
+df3 <- observaciones %>% select(c(...1, ticket_id,FechaCompra,HoraOperacion,
+                                  NumeroOperacion,Plazas, Cantidad, Descripcion,
+                                  PrecioUnitario, PrecioPorKilo,Importe,ImporteTotal))
+
+datos_agrupados <- df3 %>% group_by(ticket_id)
+productos_por_ticket <- summarise(datos_agrupados, n= n(), HoraOperacion)
+a<- unique(productos_por_ticket)
+
+
+a$HoraOperacion <- as.POSIXct(a$HoraOperacion, format = "%H:%M:%S")
+
+hora_inicio <- as.POSIXct("09:00:00", format = "%H:%M:%S")  
+hora_fin <- as.POSIXct("21:00:00", format = "%H:%M:%S")     
+intervalos_horas <- seq(hora_inicio, hora_fin, by = "hour")
+
+# Crea un vector con los nombres de los intervalos
+nombres_intervalos <- paste0(format(intervalos_horas, "%H:%M"), " - ", format(intervalos_horas + 3600, "%H:%M"))
+print(nombres_intervalos)
+# Asigna cada hora en 'hora_compra' a su respectivo intervalo
+a$intervalo_hora <- cut(a$HoraOperacion, breaks = "hour", labels = nombres_intervalos, right = FALSE)
+
+
+# Extraer solo la hora de la columna HoraOperacion
+a$hora <- hour(a$HoraOperacion)
+```
+
+```{r figura 17, include=FALSE}
+# Crear un tema personalizado
+tema_personalizado <- theme_minimal() +
+  theme(
+    #text = element_text(family = "Arial", color = "#333333"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom"
+  )
+```
+
+```{r figura 18, echo=FALSE}
+gr <- ggplot(data = a, aes(x = hora)) +
+  geom_histogram(color = "black", fill = "blue", bins = 13) +  # Usar bins = 13 para representar horas de 9 a 21
+  labs(title = "Distribución de compras por hora", x = "Hora", y = "Frecuencia") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_x_continuous(breaks = 9:21, labels = paste(9:21, ":00", sep = "")) +
+  scale_y_continuous(breaks = seq(0, 100, by = 10)) +
+  tema_personalizado
+
+
+
+if (knitr::is_html_output()) {
+  gr2 <- ggplotly(gr)
+  gr2
+} else {
+  gr
+}
+```
+
+Como se puede ver en el histograma, la mayoría de las compras se realizan a las ocho de la tarde.
+Es también curioso observar como a primera y última hora del día apenas hay clientes.
+
+```{r figura 19, echo=FALSE}
+datos_agrupados <- df3 %>% group_by(ticket_id)
+productos_por_ticket2 <- summarise(datos_agrupados, n= n(), HoraOperacion, ImporteTotal)
+gbn<- unique(productos_por_ticket2)
+# Importar la columna 'intervalo_hora' del dataframe 'a' al dataframe 'gbn'
+gbn$intervalo_hora <- a$intervalo_hora
+
+p18 <- ggplot(gbn, aes(x = intervalo_hora, y = ImporteTotal)) +
+  geom_boxplot(color = "blue") +
+  labs(title = "Relación entre intervalo horario e importe total del ticket",
+       x = "Intervalo horario",
+       y = "Importe") +
+  theme_minimal() +
+  theme(
+    #text = element_text(family = "Arial", color = "#333333"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1), # Rotar etiquetas
+    legend.position = "bottom"
+  )
+
+
+
+if (knitr::is_html_output()) {
+  p19 <- ggplotly(p18)
+  p19
+} else {
+  p18
+}
+```
+
+El gráfico sugiere que el importe total del ticket varía significativamente en función de la hora del día.
+En particular, parece que los tickets de compra realizados entre las 13:00 y las 16:00 horas tienden a tener un importe total más bajo pero con más valores atípicos.
+
+Por otro lado, los tickets de compra realizados entre las 09:00 y las 13:00 horas tienden a tener un importe total más alto, con menos valores atípicos.
+
+Como curiosidad, podemos ver que la compra con el importe más alto se realizó entre las 11:00 y las 12:00 de la mañana, con un valor de casi 250 euros.
+
+
+## ¿Cómo varía las compras entre distintos días?
+
+Podríamos pensar que los clientes compran más productos durante los fines de semana, ya que tienen más tiempo libre para hacer la compra. ¿Es esto cierto?
+
+```{r cleaning environment 4, include=FALSE}
+rm(list = ls())
+```
+
+```{r, include=FALSE}
+# Cargamos las bibliotecas que vamos a usar.
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Leemos el fichero .csv con la información de todos los tickets.
+tickets <- read.csv("ficheros_posteriores/observaciones.csv")
+
+# Definimos un nuevo dataframe y lo preparamos para poder trabajar más fácilmente con él:
+tickets_dia <- tickets %>%
+  select(ticket_id, Municipio, FechaCompra, Plazas, Entrada, Salida, ImporteTotal) %>%
+  distinct()
+
+# Convertimos la columna 'FechaCompra' a formato Date
+tickets_dia$FechaCompra <- as.Date(tickets_dia$FechaCompra, format = "%d/%m/%Y")
+
+# Establecemos el locale para asegurar que los días se obtengan en español
+Sys.setlocale("LC_TIME", "es_ES.UTF-8")
+
+# Obtenemos el nombre del día en español
+tickets_dia$dia_semana <- weekdays(tickets_dia$FechaCompra)
+
+# Creamos la variable 'tipo_dia' para distinguir entre semana y fin de semana
+tickets_dia <- tickets_dia %>%
+  mutate(tipo_dia = ifelse(dia_semana %in% c("viernes", "sábado", "domingo"), "fin de semana", "entre semana"))
+
+# Comparamos mediante la variable parking:
+# Para ello creamos un dataframe con solo los tickets que han usado el parking.
+tickets_con_parking <- tickets_dia %>% filter(!is.na(Plazas))
+
+# Ahora creamos un dataframe con la gente que usa el parking entre semana y la gente que lo usa el fin de semana:
+parking_finde <- filter(tickets_con_parking, tipo_dia == "fin de semana")
+parking_entre <- filter(tickets_con_parking, tipo_dia == "entre semana")
+
+# Contar el número total de personas que usan el parking
+num_parking <- nrow(tickets_con_parking)
+
+# Mostrar el número total de personas que usan el parking
+cat("Número total de personas que usan el parking:", num_parking, "\n")
+
+# Contar el número total de personas que no usan el parking
+num_sin_parking <- nrow(filter(tickets_dia, is.na(Plazas)))
+
+# Mostrar el número total de personas que no usan el parking
+cat("Número total de personas que no usan el parking:", num_sin_parking, "\n")
+
+# Calcular el número total de tickets
+numero_tickets <- num_parking + num_sin_parking
+
+# Calcular la proporción de personas que usan el parking
+prop_parking <- num_parking / numero_tickets
+
+# Calcular la proporción de personas que no usan el parking
+prop_sin_parking <- num_sin_parking / numero_tickets
+
+# Mostrar las proporciones
+cat("Proporción de personas que usan el parking:", prop_parking * 100, "%.", "\n")
+cat("Proporción de personas que no usan el parking:", prop_sin_parking * 100, "%.", "\n")
+
+# Ahora vamos a obtener el número de gente que usa el parking el fin de semana:
+num_parking_finde <- nrow(parking_finde)
+# Vamos a obtener el número de gente que compra el fin de semana:
+num_finde <- nrow(filter(tickets_dia, tipo_dia == "fin de semana"))
+
+# Calcular la proporción de personas que usan el parking durante el fin de semana
+prop_parking_finde <- num_parking_finde / num_finde
+
+# Ahora vamos a obtener el número de gente que usa el parking entre semana:
+num_parking_entre <- nrow(parking_entre)
+prop_parking_entre <- num_parking_entre / num_finde
+
+# Interpretar la proporción de personas que usan el parking durante el fin de semana
+cat("La proporción de personas que usan el parking durante el fin de semana es del", prop_parking_finde * 100, "%.", "\n")
+
+# Interpretar la proporción de personas que usan el parking entre semana
+cat("La proporción de personas que usan el parking entre semana es del", prop_parking_entre * 100, "%.", "\n")
+
+# Definir el orden de los días de la semana, ya que más tarde me va a ser útil para la creación de gráficas:
+tickets_dia$dia_semana <- factor(tickets_dia$dia_semana, 
+                                  levels = c("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+                                  ordered = TRUE)
+
+tickets_con_parking$dia_semana <- factor(tickets_con_parking$dia_semana, 
+                                  levels = c("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+                                  ordered = TRUE)
+```
+
+```{r, include=FALSE}
+# Crear un tema personalizado
+tema_personalizado <- theme_minimal() +
+  theme(
+    #text = element_text(family = "Arial", color = "#333333"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom"
+  )
+```
+
+```{r figura 20, echo=FALSE}
+# Creamos un gráfico de barras, comparo los dias de la semana y la media de lo
+# que se gasta en cada día.
+# Asumiendo que 'tickets_dia' es tu dataframe y ya está cargado
+p20 <- ggplot(tickets_dia, aes(x = dia_semana, y = ImporteTotal, fill = factor(dia_semana))) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(x = "Día", y = "Importe", title = "Gasto medio según el día", fill = "Leyenda") +
+  tema_personalizado +
+  guides(fill = FALSE)
+
+
+
+if (knitr::is_html_output()) {
+  p21 <- ggplotly(p20)
+  p21
+} else {
+  p20
+}
+```
+
+Como podemos comprobar gracias a la gráfica, el jueves es el día de la semana donde más se gasta de media, seguido del miércoles.
+Por otro lado, el domingo es el día que menos dinero se gasta de media.
+
+```{r figura 21, echo=FALSE}
+# Creamos otro gráfico de barras, esta vez vamos a relacionar y comparar los 
+# dias que la gente usa el parcking:
+p22 <- ggplot(tickets_con_parking, aes(x = dia_semana, fill = dia_semana)) +
+  geom_bar(stat = "count", position = "dodge") +
+  labs(x = "Día de la semana", y = "Frecuencia", 
+       title = "Número de veces que se usa el parking") +
+  theme_minimal() +
+  tema_personalizado +
+  guides(fill = FALSE)
+
+
+
+if (knitr::is_html_output()) {
+  p23 <- ggplotly(p22)
+  p23
+} else {
+  p22
+}
+```
+
+El gráfico sugiere que son los lunes y los sábados los días que más se usa el parking. Por otro lado, el domingo es el día que menos se usa el parking. Obvio, ya que los domingos Mercadona no suele abrir.
+
+```{r figura 22, echo=FALSE}
+# Grafico boxplot, tendencia de gastos:
+p24 <- ggplot(tickets_dia, aes(x = dia_semana, y = ImporteTotal, fill = dia_semana)) +
+  geom_boxplot() +
+  labs(x = "Fecha de compra", y = "Gasto total", title = "Tendencia de gasto total por tipo de día") +
+  tema_personalizado +
+  guides(fill = FALSE)
+
+if (knitr::is_html_output()) {
+  p25 <- ggplotly(p24)
+  p25
+} else {
+  p24
+}
+```
+
+El gráfico sugiere que la mediana alcanza su máximo el jueves, y decrece hasta el domingo. También podemos ver cómo los miércoles son los días que más varía la compra, y los domingos los días que menos varía. Lo que indica la estabilidad de caja. 
+
+
+# CONCLUSIONES
+
+Tras completar todas las etapas del tratamiento de datos, tanto los proporcionados por el profesor como los recopilados por los miembros del equipo, hemos llegado a la conclusión de que es extremadamente complicado extraer conclusiones sólidas con una muestra tan pequeña de tickets, especialmente considerando la gran cantidad de compras realizadas diariamente en todos los supermercados de Mercadona en España.
+
+Sin embargo, destacamos algunas conclusiones de este proyecto: - Notamos que el uso del estacionamiento es más frecuente en compras de mayor valor.
+- No hay una correlación significativa entre la competencia cercana y el importe total de las compras.
+- Los días laborables registran un gasto promedio más alto.
+- Se observa un mayor número de compras con un importe total más elevado en las principales ciudades en comparación con áreas más pequeñas.
+- Se observa una tendencia a realizar compras más grandes por la mañana.
+
+
+# AGRADECIMIENTOS
+
+En este espacio, deseamos expresar nuestra más sincera gratitud a todas las personas que han hecho posible la realización del proyecto.
+
+En primer lugar, queremos agradecer al profesor de la asignatura, por su dedicación y apoyo durante todo el proceso de aprendizaje y desarrollo del proyecto.
+Su orientación y comentarios han sido fundamentales para el éxito del proyecto.
+
+También queremos agradecer a todas las personas que nos han proporcionado tickets de Mercadona para su análisis.
+Sin su colaboración y disposición, no habría sido posible llevar a cabo este proyecto.
